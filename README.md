@@ -1,23 +1,236 @@
-[![ci](https://github.com/okdp/charts/actions/workflows/ci.yml/badge.svg)](https://github.com/okdp/spark-history-server/actions/workflows/ci.yml)
-[![release-please](https://github.com/okdp/charts/actions/workflows/release-please.yml/badge.svg)](https://github.com/okdp/spark-history-server/actions/workflows/release-please.yml)
-[![License Apache2](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
-
 <p align="center">
-    <img width="400px" height=auto src="https://okdp.io/logos/okdp-inverted.png" />
+  <a href="https://okdp.io">
+    <img src="https://okdp.io/logos/okdp-inverted.png" alt="OKDP — Open Kubernetes Data Platform" height="180" />
+  </a>
 </p>
 
+[![CI](https://github.com/OKDP/spark-history-server/actions/workflows/ci.yml/badge.svg)](https://github.com/OKDP/spark-history-server/actions/workflows/ci.yml)
+[![release-please](https://github.com/OKDP/spark-history-server/actions/workflows/release-please.yml/badge.svg)](https://github.com/OKDP/spark-history-server/actions/workflows/release-please.yml)
+[![Release](https://img.shields.io/github/v/release/OKDP/spark-history-server)](https://github.com/OKDP/spark-history-server/releases/latest)
+[![License Apache2](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](http://www.apache.org/licenses/LICENSE-2.0)
 
-A Helm chart for the [Spark History Server](https://spark.apache.org/docs/latest/monitoring.html#viewing-after-the-fact).
+# OKDP Spark History Server
 
-## Installation
+OKDP Spark History Server is a packaging of the [Apache Spark History Server](https://spark.apache.org/docs/latest/monitoring.html#viewing-after-the-fact) for Kubernetes: a Helm chart that wraps the upstream Spark History Server with OAuth2/OIDC providers (Keycloak, Dex), optional OAuth2 for Trino, and externalized Kubernetes Secrets.
 
-Refer to [README](helm/spark-history-server/README.md) for the customization and installation guide.
+## Why this project
+
+The upstream OKDP Spark Helm chart deploys Spark History Server, but several integrations have to be implemented from scratch on every install:
+
+- **OAuth2/OIDC requires custom Python code.** Wiring Keycloak or Dex means writing a `CustomSsoSecurityManager` and injecting it via `configOverrides`.
+- **The official Docker image does not bundle Trino, PostgreSQL drivers or `Authlib`.** They have to be installed at deploy time or in a custom image.
+- **Secrets live in `values.yaml`.** Spark Application, S3 Storage secrets are not separated into dedicated Kubernetes Secrets.
+
+OKDP Spark History Server adds a thin layer on top that ships these integrations as defaults:
+
+- Ready-to-use Keycloak and Dex providers in the chart.
+- Optional OAuth2 client wiring for a Trino datasource.
+- Weekly automated rebuild of the latest release tag to pick up base-image security patches.
+
+## What the project does
+
+This repository builds and publishes:
+
+- A Helm chart that installs the OKDP Spark History Server (based on the [`quay.io/okdp/spark`](https://quay.io/okdp/spark) image) and adds the OKDP defaults listed in [Why this project](#why-this-project).
+
+### Delivered artifacts
+
+- **Helm chart** `spark-history-server` — published as `oci://quay.io/okdp/charts/spark-history-server`.
+- **Kubernetes manifests rendered by the chart**:
+  - `Deployment` running the Spark History Server process.
+  - `Service` exposing the web UI on port `18080` by default.
+  - `ConfigMap` rendering `history-server.conf` and `log4j2.properties` from Helm values.
+  - Optional `Ingress` for external access.
+  - Optional `ServiceAccount` support.
+- **OKDP defaults**:
+  - Uses the OKDP Spark runtime image `quay.io/okdp/spark` by default.
+  - Exposes Spark History Server configuration through `.Values.config`.
+  - Provides security-conscious pod/container defaults such as dropped Linux capabilities and `RuntimeDefault` seccomp profile.
+
+## Architecture
+
+The diagram below shows the components that a `helm install` of this chart creates inside a Kubernetes cluster. For the upstream Spark History Server runtime design, see the [official Apache Spark monitoring documentation](https://spark.apache.org/docs/latest/monitoring.html).
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="OKDP Spark History Server — deployment architecture" width="800" />
+</p>
 
 ## Requirements
 
-- Kubernetes cluster
-- [Helm](https://helm.sh/) installed
+- A Kubernetes cluster.
+- [Helm](https://helm.sh/) `>= 3`.
+- A location for Spark event logs readable by the server (a filesystem path, a PVC, or S3-compatible storage).
 
-> [!NOTE]
-> An OKDP sandbox, with all these helm charts installed, is under development and you can use it once released.
-> 
+### Toolchain tested
+
+| Tool | Version |
+|:-----|:--------|
+| Kubernetes (Kind) | `1.35.1` |
+| Kind | `0.31.0` |
+| Helm CLI | `3.20.0` |
+| kubectl | `1.35.1` |
+| Docker | `29.2.1` |
+
+---
+
+## Installation
+
+---
+
+Install the spark-history-server with the serviceAccount
+
+```bash
+helm upgrade --install spark-history-server oci://quay.io/okdp/charts/spark-history-server \
+  --version 1.0.0 \
+  --namespace spark --create-namespace \
+  --wait \
+  --timeout 10m
+```
+
+Expected result:
+
+```
+NAME: spark-history-server
+LAST DEPLOYED: <timestamp>
+NAMESPACE: spark
+STATUS: deployed
+REVISION: 1
+```
+
+Verify the pods are running:
+
+```sh
+kubectl get pods -n spark -l app.kubernetes.io/name=spark-history-server
+```
+
+**Expected result:**
+
+```text
+NAME                                        READY   STATUS    RESTARTS   AGE
+pod/spark-history-server-xxxxxxxxxx-yyyyy   1/1     Running   0          1m
+```
+
+The pod hash suffix (`...`) varies per install.
+
+> Replace `1.0.0` with the latest chart version from [Releases](https://github.com/OKDP/spark-history-server/releases).
+
+
+---
+
+## Configuration
+
+The table below lists the main values that usually need to be reviewed. For the full autogenerated values reference, see [helm/spark-history-server/README.md](helm/spark-history-server/README.md).
+
+| Parameter | Description | Default | Required |
+|-----------|-------------|---------|:--------:|
+| `replicaCount` | Number of Spark History Server pods. | `1` | No |
+| `image.repository` | Runtime image repository. | `quay.io/okdp/spark` | Yes |
+| `image.tag` | Runtime image tag. | `spark-3.5.1-scala-2.12-java-17-2024-04-04-1.0.0` | Yes |
+| `config.spark.history.provider` | Spark history provider implementation. | `org.apache.spark.deploy.history.FsHistoryProvider` | No |
+| `config.spark.history.fs.logDirectory` | Event log directory read by Spark History Server. | `file:/tmp/spark-events` | Yes |
+| `config.spark.history.ui.port` | Spark History Server UI port. | `18080` | No |
+| `extraEnvs` | Additional environment variables, commonly used for storage credentials. | `[]` | No |
+| `envFrom` | Import environment variables from ConfigMaps or Secrets. | `[]` | No |
+| `extraVolumes` / `extraVolumeMounts` | Additional volumes and mounts, commonly used for credentials or custom storage config. | `[]` | No |
+| `service.type` | Kubernetes Service type. | `ClusterIP` | No |
+| `service.port` | Service port. | `18080` | No |
+| `ingress.enabled` | Whether to create an Ingress. | `false` | No |
+| `ingress.ingressClassName` | Ingress class name. | `""` | No |
+
+---
+
+## Components
+
+This repository is a Helm chart repository. It does not build a dedicated Docker image; it deploys Spark History Server using the OKDP Spark runtime image.
+The Helm chart is published under [quay.io/okdp/charts/spark-history-server](https://quay.io/repository/okdp/charts/spark-history-server):
+
+| Component | Type | Purpose | Installed by default | Main configuration |
+|-----------|------|---------|:--------------------:|--------------------|
+| `spark-history-server` | Helm chart | Packages the Kubernetes resources required to run Spark History Server. | Yes | Chart version `1.0.0`, app version `3.5.1` |
+
+---
+
+## OKDP Integration
+
+This component is part of the [OKDP Data Platform](https://okdp.io) — a cloud-native, open-source data platform for Kubernetes.
+
+In an OKDP deployment, Spark workloads produce event logs during execution. Spark History Server reads those persisted logs and exposes a UI for post-run inspection. It complements the Spark runtime and object storage layers by making completed or incomplete Spark application attempts discoverable after the original Spark driver UI is gone.
+
+Typical OKDP integration points:
+
+- **Spark runtime:** Spark jobs must enable event logging and write logs to the shared directory.
+- **Object storage or filesystem layer:** stores event logs, commonly through S3A-compatible configuration.
+- **Ingress / platform routing:** optionally exposes the UI to users.
+- **Observability and troubleshooting workflows:** users inspect stages, jobs, executors, SQL plans, and failed attempts after execution.
+
+---
+
+### Tests
+
+Refer to the [TEST](docs/TEST.md) document.
+
+---
+
+### Cleanup
+
+Removes all Kubernetes components associated with the chart and deletes the release.
+
+```sh
+helm uninstall spark-history-server -n spark
+```
+
+If the namespace was created only for this installation, remove it:
+
+```sh
+kubectl delete namespace spark
+```
+
+**Expected result:**
+
+```text
+namespace "spark" deleted
+```
+
+### External storage cleanup
+
+The chart does not delete event logs stored in S3, HDFS, PVCs managed outside the chart, or other external filesystems. Clean those locations separately if required by your retention policy.
+
+## Components
+
+Artifacts are published to [`quay.io/okdp`](https://quay.io/organization/okdp).
+
+| Component | Reference | Example |
+|-----------|-----------|---------|
+| Helm chart | [`quay.io/okdp/charts/spark-history-server`](https://quay.io/repository/okdp/charts/spark-history-server) | `oci://quay.io/okdp/charts/spark-history-server:1.0.0` |
+| Spark image | [`quay.io/okdp/spark`](https://quay.io/repository/okdp/spark) | `quay.io/okdp/spark:spark-3.5.6-scala-2.12-java-17` |
+
+> See [Releases](https://github.com/OKDP/spark-history-server/releases) for the full changelog and all available chart versions.
+
+## OKDP Integration
+
+This component is part of the OKDP Data Platform, a cloud-native, open-source data platform for Kubernetes.
+
+- Built on the OKDP [spark-images](https://github.com/OKDP/spark-images) (`quay.io/okdp/spark`).
+- Pairs with the OKDP [spark-web-proxy](https://github.com/OKDP/spark-web-proxy) to surface running applications alongside completed ones in the same Spark History Server UI.
+- Deployed as part of the [okdp-sandbox](https://github.com/OKDP/okdp-sandbox).
+
+---
+
+## Alternatives
+
+| Alternative | When to consider it |
+|---|---|
+| Upstream [Apache Spark History Server](https://spark.apache.org/docs/latest/monitoring.html#viewing-after-the-fact) chart | You don't need the OKDP OAuth2/OIDC, Trino or externalized-Secrets defaults and prefer wiring integrations yourself. |
+| [spark-web-proxy](https://github.com/OKDP/spark-web-proxy) | You also need *running* applications visible in the History Server UI, not only completed ones. |
+| [OKDP Spark Auth Filter](https://github.com/OKDP/okdp-spark-auth-filter) | Complementary OKDP component to secure Spark Web UIs and Spark History Server with OAuth2/OIDC. Use it when the History Server UI must be protected by an identity provider and Spark ACLs should be driven by user email, groups, or roles. |
+
+## Contributing & License
+
+Contributions follow the [OKDP contribution guide](https://github.com/OKDP/.github/blob/main/CONTRIBUTING.md). Released under the [Apache License 2.0](LICENSE).
+
+---
+
+**Built 🚀 for the OKDP Community**
+<a href="https://okdp.io">
+  <img src="https://okdp.io/logos/okdp-notext.svg" height="20px" style="margin: 0 2px;" />
+</a>
